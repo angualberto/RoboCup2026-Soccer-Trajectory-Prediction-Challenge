@@ -1,0 +1,41 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+*.dylib
+*.dll
+.env
+.venv/
+venv/
+env/
+*.log
+.DS_Store
+Thumbs.db
+
+# Weight checkpoints (keep only best)
+weights/gtpa_robocup2D/*_state_dict_*.pth
+!weights/gtpa_robocup2D/16_20_state_dict_best.pth
+weights/gtpa_robocup2D/*/params.p
+weights/RNN_robocup2D/
+
+# Data directories
+robocup2d_data/
+test_data_2026/
+test_old/
+
+# Temp files
+check_ball.py
+check_ball2.py
+compare_rnn.py
+rnn_results/
+clifford-group-equivariant-neural-networks-master/
+clifford-group-equivariant-neural-networks-master.zip
+metadata/
+explicacao_arquivos.txt
+plot_challenge.py
+download.py
+download_from_gdrive.py
