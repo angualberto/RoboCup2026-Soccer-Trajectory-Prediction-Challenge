@@ -136,7 +136,7 @@ If you use this work, please cite:
 ```bibtex
 @inproceedings{c3bots2026,
   title={GTPA with Fluid Ball Dynamics and Intercept Correction for Soccer Trajectory Prediction},
-  author={C3bots Team},
+  author={André Gualberto and C3bots Team},
   year={2026}
 }
 ```
