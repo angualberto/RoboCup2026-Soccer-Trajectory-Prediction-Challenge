@@ -193,6 +193,18 @@ Deixa de tratar todo o jogo como caótico e passa a modelá-lo como um **sistema
 4. **Todas as 4 cenas oficiais são BALL-AT-FEET** — sem chutes no boundary
 5. **O intercept precisa de um alvo estável** — γ alto mantém a bola numa região pequena
 
+## Integrator Results
+
+| Integrator | test_old | 2026 |
+|------------|:--------:|:----:|
+| legacy (network Euler) | 6.95m | 14.92m |
+| Euler (pos_t + v*dt) | 7.60m | — |
+| **Heun (RK2)** | **6.85m** | **14.74m** |
+| Simpson 1/3 | 6.96m | 14.74m |
+| AB2 | 7.67m | — |
+
+Heun (RK2) = `x_{t+1} = x_t + (v_t + v_{t+1})/2 * dt`. Melhor integrador: reduz erro de integração sem custo computacional adicional.
+
 ## Dados para Treino do Detector
 
 - `.rcg.gz`: full match logs (posições)

@@ -21,8 +21,21 @@ This project implements a trajectory prediction model for the RoboCup 2026 Socce
 | RNN | 39.35m | — |
 | GTPA Baseline | 56.87m | — |
 | + PF + Fluid Ball γ=0.4 | 15.46m | -72.8% |
-| **+ PF + Fluid Ball γ=0.6** | **14.92m** | **-73.8%** |
+| + PF + Fluid Ball γ=0.6 | 14.92m | -73.8% |
 | — without intercept | 32.36m | -43.1% |
+| **+ Heun integrator** | **14.74m** | **-74.1%** |
+
+### Integrator Comparison
+
+| Integrator | test_old | 2026 |
+|------------|:--------:|:----:|
+| legacy (Euler in network) | 6.95m | 14.92m |
+| Euler (pos_t + v*dt) | 7.60m | — |
+| **Heun (RK2)** | **6.85m** | **14.74m** |
+| Simpson 1/3 | 6.96m | 14.74m |
+| AB2 | 7.67m | — |
+
+Heun (RK2) replaces the network's position update with `x_{t+1} = x_t + (v_t + v_{t+1})/2 * dt`, reducing integration drift. |
 
 **Key finding:** Intercept correction is the single most important component, responsible for ~60% of total gain. Without it, error doubles across all 4 scenes.
 
@@ -106,7 +119,8 @@ python main.py --model gtpa --data robocup2D --data_dir robocup2d_data \
     --pf_alpha 0.5 --pf_beta 0.5 --pf_gamma 1.0 --pf_num_particles 32 \
     --use_recursive_memory --recursive_alpha 0.3 \
     --use_intercept --intercept_beta 0.5 --intercept_horizon 5 --intercept_weight 0.5 \
-    --use_fluid_ball --fluid_ball_gamma 0.6 --fluid_ball_sigma 0.02
+    --use_fluid_ball --fluid_ball_gamma 0.6 --fluid_ball_sigma 0.02 \
+    --integrator heun
 ```
 
 ### Evaluation

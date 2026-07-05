@@ -139,7 +139,7 @@ class GTPAModel(nn.Module):
             hybrid_fluid_accel=params.get('HYBRID_FLUID_ACCEL', 0.5),
             use_ocsvm_ball=params.get('USE_OCSVM_BALL', False),
             ocsvm_model_path=params.get('OCSVM_MODEL_PATH', 'weights/ocsvm_ball.pkl'),
-            use_simpson=params.get('USE_SIMPSON', False),
+            integrator=params.get('INTEGRATOR', 'legacy'),
             use_dynamic_fallback=params.get('USE_DYNAMIC_FALLBACK', False),
             fallback_w_dist=params.get('FALLBACK_W_DIST', 0.5),
             fallback_w_speed=params.get('FALLBACK_W_SPEED', 0.3),

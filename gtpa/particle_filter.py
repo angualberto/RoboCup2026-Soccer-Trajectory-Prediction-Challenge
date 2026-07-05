@@ -76,7 +76,7 @@ class ParticleFilter:
                  hybrid_fluid_accel=0.5,
                  use_ocsvm_ball=False,
                  ocsvm_model_path='weights/ocsvm_ball.pkl',
-                 use_simpson=False,
+                 integrator='euler',
                  use_dynamic_fallback=False,
                  fallback_w_dist=0.5, fallback_w_speed=0.3,
                  fallback_w_horizon=0.2, fallback_w_accel=0.0,
@@ -165,9 +165,9 @@ class ParticleFilter:
                 print(f'[PF] WARNING: OCSVM model not found, disabling')
                 self.use_ocsvm_ball = False
 
-        # Simpson integration: replaces Euler x+=v*dt with Simpson's 1/3 rule
-        self.use_simpson = use_simpson
-        self._ball_vel_buffer = []  # stores last 2 ball velocities for Simpson
+        # Integrator: euler, heun, simpson, ab2
+        self.integrator = integrator
+        self._ball_vel_buffer = []  # stores last 2 ball velocities for multi-step integrators
 
         # Dynamic fallback: blend baseline (pure network) and Lorentz-corrected
         # ball trajectory using a stability-based weight α ∈ [0,1].
@@ -565,25 +565,40 @@ class ParticleFilter:
                 else:
                     next_state[:, 22:23, 2:4] = ball_lorentz
 
-                # Simpson integration for ball position
-                if self.use_simpson:
-                    ball_vel_t = current[0:1, 22:23, 2:4]
-                    self._ball_vel_buffer.append(ball_vel_t.detach().clone())
-                    ball_pos_t = current[0:1, 22:23, 0:2]
-                    if len(self._ball_vel_buffer) >= 3:
-                        v_prev2 = self._ball_vel_buffer[-3]
-                        v_prev1 = self._ball_vel_buffer[-2]
-                        v_curr = ball_lorentz
-                        v_prev2 = v_prev2.expand_as(v_curr)
-                        v_prev1 = v_prev1.expand_as(v_curr)
-                        simpson_vel = (v_prev2 + 4.0 * v_prev1 + v_curr) / 6.0
-                        ball_pos_t_exp = ball_pos_t.expand_as(next_state[:, 22:23, 0:2])
-                        next_state[:, 22:23, 0:2] = ball_pos_t_exp + simpson_vel * dt
-                    else:
-                        next_state[:, 22:23, 0:2] = ball_pos_t.expand_as(
-                            next_state[:, 22:23, 0:2]) + ball_lorentz * dt
-                else:
+                # Integrator for ball position
+                if self.integrator == 'legacy':
                     next_state[:, 22:23, 0:2] = next_state[:, 22:23, 0:2] + ball_noise * dt * 0.5
+                else:
+                    ball_vel_t = current[0:1, 22:23, 2:4]  # v_t
+                    ball_pos_t = current[0:1, 22:23, 0:2]  # x_t
+                    n = ball_lorentz.shape[0]  # B*P
+                    v_tp1 = ball_lorentz  # damped velocity at t+1
+                    v_t_exp = ball_vel_t.expand(n, 1, 2).clone()
+
+                    if self.integrator == 'euler':
+                        integrated_vel = v_tp1
+                    elif self.integrator == 'heun':
+                        integrated_vel = (v_t_exp + v_tp1) / 2.0
+                    elif self.integrator == 'simpson':
+                        self._ball_vel_buffer.append(ball_vel_t.detach().clone())
+                        if len(self._ball_vel_buffer) >= 3:
+                            v_prev2 = self._ball_vel_buffer[-3].expand(n, 1, 2)
+                            v_prev1 = self._ball_vel_buffer[-2].expand(n, 1, 2)
+                            integrated_vel = (v_prev2 + 4.0 * v_prev1 + v_tp1) / 6.0
+                        else:
+                            integrated_vel = v_tp1
+                    elif self.integrator == 'ab2':
+                        self._ball_vel_buffer.append(ball_vel_t.detach().clone())
+                        if len(self._ball_vel_buffer) >= 2:
+                            v_prev = self._ball_vel_buffer[-2].expand(n, 1, 2)
+                            integrated_vel = (3.0 * v_t_exp - v_prev) / 2.0
+                        else:
+                            integrated_vel = v_tp1
+                    else:
+                        integrated_vel = v_tp1
+
+                    ball_pos_t_exp = ball_pos_t.expand(n, 1, 2)
+                    next_state[:, 22:23, 0:2] = ball_pos_t_exp + integrated_vel * dt
 
             # ---- Hybrid ball: regime-aware damping ----
             if self.use_hybrid_ball and P > 1:
