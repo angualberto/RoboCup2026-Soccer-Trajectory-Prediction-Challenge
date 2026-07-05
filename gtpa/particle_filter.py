@@ -70,6 +70,10 @@ class ParticleFilter:
                  pn_N=4.0, pn_k_lateral=2.0,
                  use_fluid_ball=False, fluid_ball_gamma=0.5,
                  fluid_ball_sigma=0.5,
+                 fluid_ball_gamma_target=None, fluid_ball_gamma_tau=3.0,
+                 use_hybrid_ball=False,
+                 hybrid_gamma=0.6, hybrid_linear_speed=0.3,
+                 hybrid_fluid_accel=0.5,
                  use_dynamic_fallback=False,
                  fallback_w_dist=0.5, fallback_w_speed=0.3,
                  fallback_w_horizon=0.2, fallback_w_accel=0.0,
@@ -122,8 +126,25 @@ class ParticleFilter:
 
         # Fluid ball: treat ball as particle in 2D fluid field (Langevin dynamics)
         self.use_fluid_ball = use_fluid_ball
-        self.fluid_ball_gamma = fluid_ball_gamma  # drag coefficient
+        self.fluid_ball_gamma = fluid_ball_gamma  # drag coefficient (initial/max)
         self.fluid_ball_sigma = fluid_ball_sigma  # noise amplitude
+        # Time-dependent gamma: gamma_eff(t) = gamma_target + (gamma - gamma_target) * exp(-t / tau)
+        # When gamma_target == gamma, behaves as constant gamma (no time decay)
+        if fluid_ball_gamma_target is None:
+            self.fluid_ball_gamma_target = fluid_ball_gamma
+        else:
+            self.fluid_ball_gamma_target = fluid_ball_gamma_target
+        self.fluid_ball_gamma_tau = fluid_ball_gamma_tau  # time constant (frames)
+
+        # Hybrid ball: regime-aware dynamics (linear / fluid / chaotic)
+        self.use_hybrid_ball = use_hybrid_ball
+        self.hybrid_gamma = hybrid_gamma  # drag for FLUID regime
+        self.hybrid_linear_speed = hybrid_linear_speed  # speed threshold for LINEAR regime
+        self.hybrid_fluid_accel = hybrid_fluid_accel  # accel threshold for FLUID regime
+        # Lorenz parameters
+        self.lorenz_sigma = 10.0
+        self.lorenz_rho = 28.0
+        self.lorenz_beta = 8.0 / 3.0
 
         # Dynamic fallback: blend baseline (pure network) and Lorentz-corrected
         # ball trajectory using a stability-based weight α ∈ [0,1].
@@ -432,7 +453,10 @@ class ParticleFilter:
 
             # ---- Fluid ball: Langevin particle noise per PF particle ----
             if self.use_fluid_ball and P > 1:
-                ball_drag = (1 - self.fluid_ball_gamma * dt)
+                f_pred = step - burn_in + 2
+                gamma_eff = (self.fluid_ball_gamma_target + (self.fluid_ball_gamma - self.fluid_ball_gamma_target)
+                             * math.exp(-f_pred / self.fluid_ball_gamma_tau))
+                ball_drag = (1 - gamma_eff * dt)
                 ball_noise = (torch.randn(B * P, 1, 2, device=device)
                               * self.fluid_ball_sigma * math.sqrt(dt))
                 ball_lorentz = next_state[:, 22:23, 2:4] * ball_drag + ball_noise
@@ -467,6 +491,35 @@ class ParticleFilter:
                 else:
                     next_state[:, 22:23, 2:4] = ball_lorentz
                 next_state[:, 22:23, 0:2] = next_state[:, 22:23, 0:2] + ball_noise * dt * 0.5
+
+            # ---- Hybrid ball: regime-aware damping ----
+            if self.use_hybrid_ball and P > 1:
+                ball_vel = next_state[:, 22:23, 2:4].squeeze(1)
+                ball_pos = next_state[:, 22:23, 0:2].squeeze(1)
+                prev_ball_vel = current[0:1, 22:23, 2:4].squeeze(1).expand_as(ball_vel)
+
+                speed = torch.norm(ball_vel, dim=-1, keepdim=True)
+                acc_norm = torch.norm(ball_vel - prev_ball_vel, dim=-1, keepdim=True) / max(dt, 1e-8)
+
+                # LOW speed: keep moving (γ=0.1, almost no damping)
+                gamma_low = 0.1
+                # NORMAL: standard damping (γ=0.6)
+                gamma_norm = self.hybrid_gamma
+                # HIGH accel: trust network more (γ=0.3, less damping)
+                gamma_high = 0.3
+
+                # Soft transition between regimes
+                w_low = torch.sigmoid((self.hybrid_linear_speed - speed) * 20.0)
+                w_high = torch.sigmoid((acc_norm - self.hybrid_fluid_accel) * 10.0)
+                w_norm = (1.0 - w_low) * (1.0 - w_high)
+
+                gamma_eff = w_low * gamma_low + w_norm * gamma_norm + w_high * gamma_high
+                ball_drag = 1.0 - gamma_eff * dt
+                ball_noise = (torch.randn(B * P, 2, device=device) * 0.02 * math.sqrt(dt))
+                new_vel = ball_vel * ball_drag + ball_noise
+
+                next_state[:, 22:23, 2:4] = new_vel.unsqueeze(1)
+                next_state[:, 22:23, 0:2] = ball_pos.unsqueeze(1) + new_vel.unsqueeze(1) * dt
 
             # ---- Per-step weights (velocity deviation + intercept alignment) ----
             p_vel = next_state[:, :22, 2:4].reshape(B, P, 22, 2)    # (B, P, 22, 2)
@@ -613,7 +666,9 @@ class ParticleFilter:
                     ball_drag = 0.0
                 else:
                     gamma_lorentz = 1.0 / math.sqrt(max(1e-8, 1.0 - (f_pred / F_pred)**2))
-                    ball_drag = self.fluid_ball_gamma / gamma_lorentz
+                    gamma_eff = (self.fluid_ball_gamma_target + (self.fluid_ball_gamma - self.fluid_ball_gamma_target)
+                                 * math.exp(-f_pred / self.fluid_ball_gamma_tau))
+                    ball_drag = gamma_eff / gamma_lorentz
                 ball_noise = (torch.randn(batch_size * P, 1, 2, device=device)
                               * self.fluid_ball_sigma * math.sqrt(dt))
                 ball_lorentz = next_state[:, 22:23, 2:4] * ball_drag + ball_noise
@@ -649,6 +704,31 @@ class ParticleFilter:
                 else:
                     next_state[:, 22:23, 2:4] = ball_lorentz
                 next_state[:, 22:23, 0:2] = next_state[:, 22:23, 0:2] + ball_noise * dt * 0.5
+
+            # ---- Hybrid ball (second path) ----
+            if self.use_hybrid_ball and P > 1:
+                ball_vel = next_state[:, 22:23, 2:4].squeeze(1)
+                ball_pos = next_state[:, 22:23, 0:2].squeeze(1)
+                prev_ball_vel = current[0:1, 22:23, 2:4].squeeze(1).expand_as(ball_vel)
+
+                speed = torch.norm(ball_vel, dim=-1, keepdim=True)
+                acc_norm = torch.norm(ball_vel - prev_ball_vel, dim=-1, keepdim=True) / max(dt, 1e-8)
+
+                gamma_low = 0.1
+                gamma_norm = self.hybrid_gamma
+                gamma_high = 0.3
+
+                w_low = torch.sigmoid((self.hybrid_linear_speed - speed) * 20.0)
+                w_high = torch.sigmoid((acc_norm - self.hybrid_fluid_accel) * 10.0)
+                w_norm = (1.0 - w_low) * (1.0 - w_high)
+
+                gamma_eff = w_low * gamma_low + w_norm * gamma_norm + w_high * gamma_high
+                ball_drag = 1.0 - gamma_eff * dt
+                ball_noise = (torch.randn(batch_size * P, 2, device=device) * 0.02 * math.sqrt(dt))
+                new_vel = ball_vel * ball_drag + ball_noise
+
+                next_state[:, 22:23, 2:4] = new_vel.unsqueeze(1)
+                next_state[:, 22:23, 0:2] = ball_pos.unsqueeze(1) + new_vel.unsqueeze(1) * dt
 
             traj[step + 1] = next_state
             vel_history.append(current[:, :22, 2:4].detach())

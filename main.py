@@ -84,6 +84,12 @@ parser.add_argument('--pn_k_lateral', type=float, default=2.0)
 parser.add_argument('--use_fluid_ball', action='store_true')
 parser.add_argument('--fluid_ball_gamma', type=float, default=0.5)
 parser.add_argument('--fluid_ball_sigma', type=float, default=0.5)
+parser.add_argument('--fluid_ball_gamma_target', type=float, default=None)
+parser.add_argument('--fluid_ball_gamma_tau', type=float, default=3.0)
+parser.add_argument('--use_hybrid_ball', action='store_true')
+parser.add_argument('--hybrid_gamma', type=float, default=0.6)
+parser.add_argument('--hybrid_linear_speed', type=float, default=0.3)
+parser.add_argument('--hybrid_fluid_accel', type=float, default=0.5)
 parser.add_argument('--use_dynamic_fallback', action='store_true')
 parser.add_argument('--fallback_w_dist', type=float, default=0.5)
 parser.add_argument('--fallback_w_speed', type=float, default=0.3)
@@ -585,6 +591,12 @@ if __name__ == '__main__':
         'USE_FLUID_BALL': args.use_fluid_ball,
         'FLUID_BALL_GAMMA': args.fluid_ball_gamma,
         'FLUID_BALL_SIGMA': args.fluid_ball_sigma,
+        'FLUID_BALL_GAMMA_TARGET': args.fluid_ball_gamma_target,
+        'FLUID_BALL_GAMMA_TAU': args.fluid_ball_gamma_tau,
+        'USE_HYBRID_BALL': args.use_hybrid_ball,
+        'HYBRID_GAMMA': args.hybrid_gamma,
+        'HYBRID_LINEAR_SPEED': args.hybrid_linear_speed,
+        'HYBRID_FLUID_ACCEL': args.hybrid_fluid_accel,
         'USE_DYNAMIC_FALLBACK': args.use_dynamic_fallback,
         'FALLBACK_W_DIST': args.fallback_w_dist,
         'FALLBACK_W_SPEED': args.fallback_w_speed,
