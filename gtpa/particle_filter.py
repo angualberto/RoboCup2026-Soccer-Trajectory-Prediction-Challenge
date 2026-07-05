@@ -74,6 +74,8 @@ class ParticleFilter:
                  use_hybrid_ball=False,
                  hybrid_gamma=0.6, hybrid_linear_speed=0.3,
                  hybrid_fluid_accel=0.5,
+                 use_ocsvm_ball=False,
+                 ocsvm_model_path='weights/ocsvm_ball.pkl',
                  use_dynamic_fallback=False,
                  fallback_w_dist=0.5, fallback_w_speed=0.3,
                  fallback_w_horizon=0.2, fallback_w_accel=0.0,
@@ -145,6 +147,23 @@ class ParticleFilter:
         self.lorenz_sigma = 10.0
         self.lorenz_rho = 28.0
         self.lorenz_beta = 8.0 / 3.0
+
+        # OCSVM confidence-based ball dynamics
+        self.use_ocsvm_ball = use_ocsvm_ball
+        self.ocsvm_model = None
+        if self.use_ocsvm_ball:
+            import pickle, os
+            path = ocsvm_model_path
+            # Try common locations
+            for p in [path, os.path.join('..', path), os.path.join(os.path.dirname(__file__), '..', 'weights', 'ocsvm_ball.pkl')]:
+                if os.path.exists(p):
+                    with open(p, 'rb') as f:
+                        self.ocsvm_model = pickle.load(f)
+                    print(f'[PF] Loaded OCSVM model from {p}')
+                    break
+            if self.ocsvm_model is None:
+                print(f'[PF] WARNING: OCSVM model not found at {ocsvm_model_path}, disabling')
+                self.use_ocsvm_ball = False
 
         # Dynamic fallback: blend baseline (pure network) and Lorentz-corrected
         # ball trajectory using a stability-based weight α ∈ [0,1].
@@ -323,6 +342,53 @@ class ParticleFilter:
                             quality=quality)
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    #  OCSVM-based gamma: extract ball features -> score -> gamma
+    # ------------------------------------------------------------------
+    def _compute_ocsvm_gamma(self, next_state, current, dt):
+        """Returns gamma_eff per particle based on OCSVM confidence score."""
+        import numpy as np
+        ball_vel = next_state[0:1, 22:23, 2:4].squeeze().cpu().numpy()  # (2,)
+        ball_pos = next_state[0:1, 22:23, 0:2].squeeze().cpu().numpy()
+        prev_vel = current[0:1, 22:23, 2:4].squeeze().cpu().numpy()
+        bvx, bvy = float(ball_vel[0]), float(ball_vel[1])
+        speed = np.linalg.norm(ball_vel)
+        acc = np.linalg.norm(ball_vel - prev_vel) / max(dt, 1e-8)
+
+        # Direction change (angle diff from prev frame)
+        angle = np.arctan2(bvy, bvx) if speed > 0.01 else 0.0
+        p_speed = np.linalg.norm(prev_vel)
+        angle_p = np.arctan2(float(prev_vel[1]), float(prev_vel[0])) if p_speed > 0.01 else 0.0
+        ad = abs(angle - angle_p)
+        angle_diff = min(ad, 2*np.pi - ad)
+
+        # Player distances
+        min_dist = float('inf')
+        nearest_speed = 0.0
+        for agent_idx in range(22):  # 22 players
+            px = float(next_state[0, agent_idx, 0].cpu().item())
+            py = float(next_state[0, agent_idx, 1].cpu().item())
+            pvx = float(next_state[0, agent_idx, 2].cpu().item())
+            pvy = float(next_state[0, agent_idx, 3].cpu().item())
+            d = np.sqrt((float(ball_pos[0])-px)**2 + (float(ball_pos[1])-py)**2)
+            if d < min_dist:
+                min_dist = d
+                nearest_speed = np.sqrt(pvx**2 + pvy**2)
+
+        features = np.array([[speed, acc, angle_diff, min_dist, nearest_speed,
+                              float(ball_pos[0]), float(ball_pos[1])]])
+        mdl = self.ocsvm_model
+        X = mdl['scaler'].transform(features)
+        Xp = mdl['pca'].transform(X)
+        score = float(mdl['ocsvm'].score_samples(Xp)[0])
+
+        # Score to gamma: score high (=normal) -> gamma high; score low (=unusual) -> gamma low
+        smin, smax = mdl.get('score_min', 0.0), mdl.get('score_max', 100.0)
+        score_norm = np.clip((score - smin) / max(smax - smin, 1e-8), 0.0, 1.0)
+        gamma_eff = 0.35 + 0.25 * score_norm  # [0.35, 0.60]
+        return gamma_eff
+
+    # ------------------------------------------------------------------
     #  Step-wise simulation with exponential trajectory smoothing
     # ------------------------------------------------------------------
     @torch.no_grad()
@@ -454,8 +520,11 @@ class ParticleFilter:
             # ---- Fluid ball: Langevin particle noise per PF particle ----
             if self.use_fluid_ball and P > 1:
                 f_pred = step - burn_in + 2
-                gamma_eff = (self.fluid_ball_gamma_target + (self.fluid_ball_gamma - self.fluid_ball_gamma_target)
-                             * math.exp(-f_pred / self.fluid_ball_gamma_tau))
+                if self.use_ocsvm_ball and self.ocsvm_model is not None:
+                    gamma_eff = self._compute_ocsvm_gamma(next_state, current, dt)
+                else:
+                    gamma_eff = (self.fluid_ball_gamma_target + (self.fluid_ball_gamma - self.fluid_ball_gamma_target)
+                                 * math.exp(-f_pred / self.fluid_ball_gamma_tau))
                 ball_drag = (1 - gamma_eff * dt)
                 ball_noise = (torch.randn(B * P, 1, 2, device=device)
                               * self.fluid_ball_sigma * math.sqrt(dt))
@@ -662,12 +731,15 @@ class ParticleFilter:
                 # Lorentz factor: grows with prediction horizon
                 f_pred = step - burn_in + 2  # 1-indexed prediction frame
                 F_pred = horizon - burn_in + 1
+                if self.use_ocsvm_ball and self.ocsvm_model is not None:
+                    gamma_eff = self._compute_ocsvm_gamma(next_state, current, dt)
+                else:
+                    gamma_eff = (self.fluid_ball_gamma_target + (self.fluid_ball_gamma - self.fluid_ball_gamma_target)
+                                 * math.exp(-f_pred / self.fluid_ball_gamma_tau))
                 if f_pred >= F_pred:
                     ball_drag = 0.0
                 else:
                     gamma_lorentz = 1.0 / math.sqrt(max(1e-8, 1.0 - (f_pred / F_pred)**2))
-                    gamma_eff = (self.fluid_ball_gamma_target + (self.fluid_ball_gamma - self.fluid_ball_gamma_target)
-                                 * math.exp(-f_pred / self.fluid_ball_gamma_tau))
                     ball_drag = gamma_eff / gamma_lorentz
                 ball_noise = (torch.randn(batch_size * P, 1, 2, device=device)
                               * self.fluid_ball_sigma * math.sqrt(dt))
