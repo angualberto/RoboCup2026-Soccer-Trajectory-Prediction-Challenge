@@ -577,8 +577,19 @@ class ParticleFilter:
 
                     if self.integrator == 'euler':
                         integrated_vel = v_tp1
+                        eff_dt = dt
                     elif self.integrator == 'heun':
                         integrated_vel = (v_t_exp + v_tp1) / 2.0
+                        eff_dt = dt
+                    elif self.integrator == 'particle_heun':
+                        integrated_vel = (v_t_exp + v_tp1) / 2.0
+                        eff_dt = dt
+                        spread = torch.std(next_state[:, :, 0:2], dim=1).mean()
+                        w_heun = torch.sigmoid((spread - 0.5) * 5.0)
+                        net_pos = next_state[:, 22:23, 0:2]
+                        heun_pos = ball_pos_t.expand(n, 1, 2) + integrated_vel * dt
+                        next_state[:, 22:23, 0:2] = (1.0 - w_heun) * net_pos + w_heun * heun_pos
+                        integrated_vel = None
                     elif self.integrator == 'simpson':
                         self._ball_vel_buffer.append(ball_vel_t.detach().clone())
                         if len(self._ball_vel_buffer) >= 3:
@@ -587,6 +598,7 @@ class ParticleFilter:
                             integrated_vel = (v_prev2 + 4.0 * v_prev1 + v_tp1) / 6.0
                         else:
                             integrated_vel = v_tp1
+                        eff_dt = dt
                     elif self.integrator == 'ab2':
                         self._ball_vel_buffer.append(ball_vel_t.detach().clone())
                         if len(self._ball_vel_buffer) >= 2:
@@ -594,11 +606,14 @@ class ParticleFilter:
                             integrated_vel = (3.0 * v_t_exp - v_prev) / 2.0
                         else:
                             integrated_vel = v_tp1
+                        eff_dt = dt
                     else:
                         integrated_vel = v_tp1
+                        eff_dt = dt
 
-                    ball_pos_t_exp = ball_pos_t.expand(n, 1, 2)
-                    next_state[:, 22:23, 0:2] = ball_pos_t_exp + integrated_vel * dt
+                    if integrated_vel is not None:
+                        ball_pos_t_exp = ball_pos_t.expand(n, 1, 2)
+                        next_state[:, 22:23, 0:2] = ball_pos_t_exp + integrated_vel * eff_dt
 
             # ---- Hybrid ball: regime-aware damping ----
             if self.use_hybrid_ball and P > 1:

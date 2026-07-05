@@ -35,7 +35,7 @@ This project implements a trajectory prediction model for the RoboCup 2026 Socce
 | Simpson 1/3 | 6.96m | 14.74m |
 | AB2 | 7.67m | — |
 
-Heun (RK2) replaces the network's position update with `x_{t+1} = x_t + (v_t + v_{t+1})/2 * dt`, reducing integration drift. |
+Heun (RK2) replaces the network's position update with `x_{t+1} = x_t + (v_t + v_{t+1})/2 * dt`, reducing integration drift.
 
 **Key finding:** Intercept correction is the single most important component, responsible for ~60% of total gain. Without it, error doubles across all 4 scenes.
 
@@ -99,6 +99,7 @@ PF Alpha: 0.5 | PF Beta: 0.5 | PF Gamma: 1.0
 Recursive Alpha: 0.3
 Intercept Beta: 0.5 | Intercept Horizon: 5 | Intercept Weight: 0.5
 Fluid Ball Gamma: 0.6 | Fluid Ball Sigma: 0.02
+Integrator: heun (default, RK2 adaptive step)
 Perturbation Noise: 0.2 | Perturbation Event: 1.0
 ```
 
@@ -119,8 +120,7 @@ python main.py --model gtpa --data robocup2D --data_dir robocup2d_data \
     --pf_alpha 0.5 --pf_beta 0.5 --pf_gamma 1.0 --pf_num_particles 32 \
     --use_recursive_memory --recursive_alpha 0.3 \
     --use_intercept --intercept_beta 0.5 --intercept_horizon 5 --intercept_weight 0.5 \
-    --use_fluid_ball --fluid_ball_gamma 0.6 --fluid_ball_sigma 0.02 \
-    --integrator heun
+    --use_fluid_ball --fluid_ball_gamma 0.6 --fluid_ball_sigma 0.02
 ```
 
 ### Evaluation

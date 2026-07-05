@@ -193,17 +193,19 @@ Deixa de tratar todo o jogo como caótico e passa a modelá-lo como um **sistema
 4. **Todas as 4 cenas oficiais são BALL-AT-FEET** — sem chutes no boundary
 5. **O intercept precisa de um alvo estável** — γ alto mantém a bola numa região pequena
 
-## Integrator Results
+## Integrator Results (final)
 
 | Integrator | test_old | 2026 |
 |------------|:--------:|:----:|
 | legacy (network Euler) | 6.95m | 14.92m |
-| Euler (pos_t + v*dt) | 7.60m | — |
+| Euler (pos_t + v·dt) | 7.60m | — |
 | **Heun (RK2)** | **6.85m** | **14.74m** |
 | Simpson 1/3 | 6.96m | 14.74m |
 | AB2 | 7.67m | — |
 
-Heun (RK2) = `x_{t+1} = x_t + (v_t + v_{t+1})/2 * dt`. Melhor integrador: reduz erro de integração sem custo computacional adicional.
+Heun (RK2) = `x_{t+1} = x_t + (v_t + v_{t+1})/2 · dt`. Consulta a velocidade amortecida duas vezes (k₁=v_t, k₂=v_{t+1}) e faz a média. Melhor integrador: reduz erro de integração sem custo computacional adicional.
+
+Variantes adaptativas testadas (adaptive_heun, confidence_heun, particle_heun) não superam Heun puro — a lógica de redução de dt quando o erro estimado é alto acaba atrasando a bola nos frames onde ela deveria se mover mais.
 
 ## Dados para Treino do Detector
 

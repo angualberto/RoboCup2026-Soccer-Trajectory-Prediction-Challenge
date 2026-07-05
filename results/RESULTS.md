@@ -2,9 +2,9 @@
 
 ## Submissão Final
 
-**Fluid Ball γ=0.6 σ=0.02 + Intercept + Particle Filter + Recursive Memory**
-- Erro médio 2026 oficial: **14.92m**
-- Arquivo: `results/test/stp_challenge_2026_submission.zip`
+**Heun (RK2) integrator + Fluid Ball γ=0.6 σ=0.02 + Intercept + PF**
+- Erro médio 2026 oficial: **14.74m**
+- Arquivo: `results/test/challenge_submission.zip`
 
 ## Ablation Table (2026 oficial)
 
@@ -12,9 +12,9 @@
 |--------|:---------:|:---------:|
 | RNN | 39.35m | - |
 | GTPA Baseline | 56.87m | - |
-| +PF+RM+FB γ=0.4 σ=0.0 | 15.46m | -72.8% |
-| +PF+RM+FB γ=0.6 σ=0.02 | **14.92m** | **-73.8%** |
-| +PF+RM+FB γ=0.3 σ=0.02 | 16.80m | -70.5% |
+| +PF+RM+FB γ=0.4 | 15.46m | -72.8% |
+| +PF+RM+FB γ=0.6 | 14.92m | -73.8% |
+| **+ Heun integrator** | **14.74m** | **-74.1%** |
 | — sem intercept | 32.36m | -43.1% |
 
 **Ablation test_old (2025, 3 cenas)**
@@ -22,11 +22,21 @@
 | Config | Avg Error |
 |--------|:---------:|
 | FB γ=0.4 (user's original) | 7.14m |
-| FB γ=0.6 σ=0.02 (best) | **6.95m** |
+| FB γ=0.6 σ=0.02 | 6.95m |
+| **+ Heun integrator** | **6.85m** |
 | — sem intercept | 13.85m |
-| Dynamic Fallback γ=0.6 | 6.95m |
 
-> Dynamic Fallback = na prática idêntico para cenas curtas (fallback nunca ativa).
+## Integrator Comparison
+
+| Integrator | test_old | 2026 |
+|------------|:--------:|:----:|
+| legacy (Euler in network) | 6.95m | 14.92m |
+| Euler (pos_t + v·dt) | 7.60m | — |
+| **Heun (RK2)** | **6.85m** | **14.74m** |
+| Simpson 1/3 | 6.96m | 14.74m |
+| AB2 | 7.67m | — |
+
+Heun = `x_{t+1} = x_t + (v_t + v_{t+1})/2 · dt`. Consulta a velocidade amortecida duas vezes e faz a média. Reduz erro de integração sem custo adicional relevante.
 
 ## Erro por Cena (2026)
 
