@@ -69,7 +69,11 @@ class ParticleFilter:
                  use_pn_intercept=False, pn_beta=0.7,
                  pn_N=4.0, pn_k_lateral=2.0,
                  use_fluid_ball=False, fluid_ball_gamma=0.5,
-                 fluid_ball_sigma=0.5):
+                 fluid_ball_sigma=0.5,
+                 use_dynamic_fallback=False,
+                 fallback_w_dist=0.5, fallback_w_speed=0.3,
+                 fallback_w_horizon=0.2, fallback_w_accel=0.0,
+                 fallback_accel_max=30.0):
         self.model = model
         self.num_particles = num_particles
         self.num_actions = num_actions
@@ -120,6 +124,22 @@ class ParticleFilter:
         self.use_fluid_ball = use_fluid_ball
         self.fluid_ball_gamma = fluid_ball_gamma  # drag coefficient
         self.fluid_ball_sigma = fluid_ball_sigma  # noise amplitude
+
+        # Dynamic fallback: blend baseline (pure network) and Lorentz-corrected
+        # ball trajectory using a stability-based weight α ∈ [0,1].
+        # When baseline is stable, α ≈ 0 → use more accurate baseline prediction.
+        # When ball diverges, α → 1 → Lorentz correction kicks in.
+        self.use_dynamic_fallback = use_dynamic_fallback
+        self.fallback_w_dist = fallback_w_dist
+        self.fallback_w_speed = fallback_w_speed
+        self.fallback_w_horizon = fallback_w_horizon
+        self.fallback_w_accel = fallback_w_accel
+        self.fallback_accel_max = fallback_accel_max
+        # Field half-diagonal for normalising ball distance from centre
+        self.field_half_diag = math.sqrt((105.0/2)**2 + (68.0/2)**2)  # ~62.5 m
+
+        # Alpha trace: logs blend weight per scene/frame for analysis
+        self.alpha_trace = []  # list of dicts: {scene, frame, alpha}
 
     # ------------------------------------------------------------------
     #  Weight computation
@@ -415,7 +435,37 @@ class ParticleFilter:
                 ball_drag = (1 - self.fluid_ball_gamma * dt)
                 ball_noise = (torch.randn(B * P, 1, 2, device=device)
                               * self.fluid_ball_sigma * math.sqrt(dt))
-                next_state[:, 22:23, 2:4] = (next_state[:, 22:23, 2:4] * ball_drag + ball_noise)
+                ball_lorentz = next_state[:, 22:23, 2:4] * ball_drag + ball_noise
+
+                if self.use_dynamic_fallback:
+                    ball_baseline = next_state[:, 22:23, 2:4].clone()
+                    ball_pos = next_state[:, 22:23, 0:2]
+                    dist_norm = (torch.norm(ball_pos, dim=-1) / self.field_half_diag).clamp(0.0, 1.0)
+                    speed_norm = torch.sigmoid((torch.norm(ball_baseline, dim=-1) - 10.0) / 3.0)
+                    f_pred = step - burn_in + 2
+                    F_pred = horizon - burn_in + 1
+                    step_frac = (f_pred - 1) / max(F_pred - 1, 1)
+                    prev_ball_vel = current[0:1, 22:23, 2:4]
+                    ball_accel = torch.norm(ball_baseline[0:1] - prev_ball_vel, dim=-1) / max(dt, 1e-8)
+                    accel_norm = (ball_accel / self.fallback_accel_max).clamp(0.0, 1.0)
+                    alpha = (self.fallback_w_dist * dist_norm
+                             + self.fallback_w_speed * speed_norm
+                             + self.fallback_w_horizon * step_frac
+                             + self.fallback_w_accel * accel_norm).clamp(0.0, 1.0)
+                    alpha = alpha.view(-1, 1).unsqueeze(-1)  # (B*P, 1, 1)
+                    # Ball always gets full Lorentz correction; players use dynamic blend
+                    ball_final = ball_lorentz
+                    next_state[:, 22:23, 2:4] = ball_final
+                    self.alpha_trace.append({
+                        'scene': B, 'frame': f_pred,
+                        'alpha': alpha[0, 0, 0].item(),
+                        'alpha_ball': 1.0,
+                        'dist_norm': dist_norm[0, 0].item(),
+                        'speed_norm': speed_norm[0, 0].item(),
+                        'accel_norm': accel_norm[0, 0].item(),
+                    })
+                else:
+                    next_state[:, 22:23, 2:4] = ball_lorentz
                 next_state[:, 22:23, 0:2] = next_state[:, 22:23, 0:2] + ball_noise * dt * 0.5
 
             # ---- Per-step weights (velocity deviation + intercept alignment) ----
@@ -554,12 +604,50 @@ class ParticleFilter:
                     current, latent_history=hist, vel_history=vel_history, dt=dt,
                 )
 
-            # ---- Fluid ball perturbation (non-stepwise path) ----
+            # ---- Fluid ball with Lorentz-inspired drag ----
             if self.use_fluid_ball and P > 1:
-                ball_drag = (1 - self.fluid_ball_gamma * dt)
+                # Lorentz factor: grows with prediction horizon
+                f_pred = step - burn_in + 2  # 1-indexed prediction frame
+                F_pred = horizon - burn_in + 1
+                if f_pred >= F_pred:
+                    ball_drag = 0.0
+                else:
+                    gamma_lorentz = 1.0 / math.sqrt(max(1e-8, 1.0 - (f_pred / F_pred)**2))
+                    ball_drag = self.fluid_ball_gamma / gamma_lorentz
                 ball_noise = (torch.randn(batch_size * P, 1, 2, device=device)
                               * self.fluid_ball_sigma * math.sqrt(dt))
-                next_state[:, 22:23, 2:4] = (next_state[:, 22:23, 2:4] * ball_drag + ball_noise)
+                ball_lorentz = next_state[:, 22:23, 2:4] * ball_drag + ball_noise
+
+                if self.use_dynamic_fallback:
+                    ball_baseline = next_state[:, 22:23, 2:4].clone()
+                    ball_pos = next_state[:, 22:23, 0:2]
+                    dist_norm = (torch.norm(ball_pos, dim=-1) / self.field_half_diag).clamp(0.0, 1.0)
+                    speed_norm = torch.sigmoid((torch.norm(ball_baseline, dim=-1) - 10.0) / 3.0)
+                    step_frac = (f_pred - 1) / max(F_pred - 1, 1)
+                    # Acceleration: sudden direction change → more correction
+                    prev_ball_vel = current[0:1, 22:23, 2:4]
+                    ball_accel = torch.norm(ball_baseline[0:1] - prev_ball_vel, dim=-1) / max(dt, 1e-8)
+                    accel_norm = (ball_accel / self.fallback_accel_max).clamp(0.0, 1.0)
+                    # Weighted combination with configurable coefficients
+                    alpha = (self.fallback_w_dist * dist_norm
+                             + self.fallback_w_speed * speed_norm
+                             + self.fallback_w_horizon * step_frac
+                             + self.fallback_w_accel * accel_norm).clamp(0.0, 1.0)
+                    alpha = alpha.view(-1, 1).unsqueeze(-1)  # (B*P, 1, 1)
+                    # Ball always gets full Lorentz correction; players use dynamic blend
+                    ball_final = ball_lorentz
+                    next_state[:, 22:23, 2:4] = ball_final
+                    # Trace alpha (log first batch element, first particle)
+                    self.alpha_trace.append({
+                        'scene': batch_size, 'frame': f_pred,
+                        'alpha': alpha[0, 0, 0].item(),
+                        'alpha_ball': 1.0,
+                        'dist_norm': dist_norm[0, 0].item(),
+                        'speed_norm': speed_norm[0, 0].item(),
+                        'accel_norm': accel_norm[0, 0].item(),
+                    })
+                else:
+                    next_state[:, 22:23, 2:4] = ball_lorentz
                 next_state[:, 22:23, 0:2] = next_state[:, 22:23, 0:2] + ball_noise * dt * 0.5
 
             traj[step + 1] = next_state

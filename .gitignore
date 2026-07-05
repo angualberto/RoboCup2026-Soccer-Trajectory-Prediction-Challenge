@@ -1,41 +1,44 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.egg-info/
+.eggs/
 dist/
 build/
-.eggs/
-*.so
-*.dylib
-*.dll
-.env
-.venv/
-venv/
-env/
-*.log
-.DS_Store
-Thumbs.db
 
-# Weight checkpoints (keep only best)
-weights/gtpa_robocup2D/*_state_dict_*.pth
-!weights/gtpa_robocup2D/16_20_state_dict_best.pth
-weights/gtpa_robocup2D/*/params.p
-weights/RNN_robocup2D/
+# Data
+challenge_input/
+test-data/
+test-data-*.zip
+ground_truth_official/
+ground_truth_official.zip
+*.rcg
+*.rcl
 
-# Data directories
-robocup2d_data/
-test_data_2026/
-test_old/
+# Experiment artifacts (not submission)
+results/test/*.json
+results/test/*_plot.png
+results/test/backup_*/
+results/test/baseline_*/
+results/test/run_*/
+results/test/submission/2026*.tracking.csv
+results/test/submission/01.tracking.csv
+results/test/submission/02.tracking.csv
+results/test/submission/03.tracking.csv
 
-# Temp files
-check_ball.py
-check_ball2.py
-compare_rnn.py
-rnn_results/
-clifford-group-equivariant-neural-networks-master/
-clifford-group-equivariant-neural-networks-master.zip
-metadata/
-explicacao_arquivos.txt
-plot_challenge.py
-download.py
-download_from_gdrive.py
+# Analysis scripts
+analyze_alpha.py
+eval.py
+eval_all.py
+eval_ball.py
+eval_dynamic.py
+validate_data.py
+plot_2026.py
+grid_search_results.csv
+
+# Temp
+.vscode/
+TDP_C3bots.md
+*.txt
+inspect_model.py
+run_inspect.sh

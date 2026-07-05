@@ -11,6 +11,12 @@ from gtpa.particle_filter import ParticleFilter
 from gtpa.integrators import rk2_step
 from gtpa.transformer_memory import CausalTransformer
 from gtpa.geometry import compute_knn_adjacency
+from gtpa.event_head import (
+    EventClassifier,
+    EventConditionedBallDynamics,
+    compute_event_loss,
+    NUM_EVENTS,
+)
 
 
 class GTPAModel(nn.Module):
@@ -29,6 +35,10 @@ class GTPAModel(nn.Module):
         self.rollout_steps = params.get('ROLLOUT_STEPS', 5)
         self.velocity_loss_weight = params.get('VELOCITY_LOSS_WEIGHT', 0.5)
         self.acceleration_loss_weight = params.get('ACCELERATION_LOSS_WEIGHT', 0.1)
+        self.accel_clamp = params.get('ACCEL_CLAMP', 0.0)
+
+        self.use_event_head = params.get('USE_EVENT_HEAD', False)
+        self.event_loss_weight = params.get('EVENT_LOSS_WEIGHT', 0.2)
 
         self.scheduled_sampling_start = params.get('SCHEDULED_SAMPLING_START', 0.0)
         self.scheduled_sampling_max = params.get('SCHEDULED_SAMPLING_MAX', 0.9)
@@ -79,6 +89,14 @@ class GTPAModel(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0.0)
 
+        # Multi-task event head (NMSTPP-inspired)
+        if self.use_event_head:
+            self.event_module = EventClassifier(
+                hidden_dim=self.hidden_dim,
+                num_events=NUM_EVENTS,
+                dropout=0.1,
+            )
+
         # Particle filter (inferência apenas)
         num_particles = params.get('num_particles', 10)
         self.particle_filter = ParticleFilter(
@@ -113,6 +131,12 @@ class GTPAModel(nn.Module):
             use_fluid_ball=params.get('USE_FLUID_BALL', False),
             fluid_ball_gamma=params.get('FLUID_BALL_GAMMA', 0.5),
             fluid_ball_sigma=params.get('FLUID_BALL_SIGMA', 0.5),
+            use_dynamic_fallback=params.get('USE_DYNAMIC_FALLBACK', False),
+            fallback_w_dist=params.get('FALLBACK_W_DIST', 0.5),
+            fallback_w_speed=params.get('FALLBACK_W_SPEED', 0.3),
+            fallback_w_horizon=params.get('FALLBACK_W_HORIZON', 0.2),
+            fallback_w_accel=params.get('FALLBACK_W_ACCEL', 0.0),
+            fallback_accel_max=params.get('FALLBACK_ACCEL_MAX', 30.0),
         )
 
     def _build_state_components(self, state_curr):
@@ -190,6 +214,12 @@ class GTPAModel(nn.Module):
 
         accel, latent = self._predict_dynamics(state_curr, latent_history=latent_history)
 
+        # Clamp acceleration magnitude to prevent unstable initial predictions
+        if self.accel_clamp > 0:
+            accel_norm = torch.norm(accel, dim=-1, keepdim=True)
+            scale = torch.clamp(self.accel_clamp / (accel_norm + 1e-8), max=1.0)
+            accel = accel * scale
+
         if self.use_rk2:
             def accel_fn(position, velocity):
                 trial_state = state_curr.clone()
@@ -214,7 +244,17 @@ class GTPAModel(nn.Module):
         ball_accel = None
         if ball_vel_history is not None and len(ball_vel_history) >= 2:
             ball_accel = (ball_vel - ball_vel_history[-1]) / dt
-        next_ball_pos, next_ball_vel = self._advance_ball(ball_pos, ball_vel, dt, ball_accel=ball_accel)
+
+        # Event-conditioned ball dynamics
+        if self.use_event_head and hasattr(self, 'event_module') and latent_history is not None and len(latent_history) >= 1:
+            with torch.no_grad():
+                event_logits, _, _ = self.event_module(latent)
+                event_logits_mean = event_logits.mean(dim=1).detach()
+            next_ball_vel = EventConditionedBallDynamics.apply(ball_vel, event_logits_mean, dt=dt)
+            next_ball_pos = ball_pos + next_ball_vel * dt
+        else:
+            next_ball_pos, next_ball_vel = self._advance_ball(ball_pos, ball_vel, dt, ball_accel=ball_accel)
+
         next_state = self._assemble_state(state_curr, next_pos, next_vel, next_ball_pos, next_ball_vel)
         return next_state, latent, accel
 
@@ -265,7 +305,7 @@ class GTPAModel(nn.Module):
 
             latent_history.append(latent.detach())
             vel_history.append(state_curr[:, :22, 2:4].detach())
-            ball_vel_history.append(state_curr[:, 22:23, 2:4].detach())
+            ball_vel_history.append(state_curr[:, 22, 2:4].detach())
 
             target_pos = state_next[:, :22, 0:2]
             target_vel = state_next[:, :22, 2:4]
@@ -314,6 +354,7 @@ class GTPAModel(nn.Module):
                 out2['e_pos'] += torch.mean(torch.norm(pred_state[:, :22, 0:2] - target_pos, dim=-1))
 
         num_steps = max(1, len_time - 1)
+
         out['L_rec'] /= num_steps
         out2['e_vel'] /= num_steps
         out2['e_pos'] /= num_steps
@@ -321,6 +362,26 @@ class GTPAModel(nn.Module):
         for key, value in extra_losses.items():
             if value.numel() > 0:
                 out[key] = value / num_steps
+
+        # ---- Event loss (multi-task auxiliary, added after normalization) ----
+        if self.use_event_head and hasattr(self, 'event_module'):
+            collected_latents = []
+            for t in range(len_time - 1):
+                state_t = states[t, 0].view(batch_size, 23, 4)
+                node_feat, adj, _, _, _ = self._build_state_components(state_t)
+                latent_t = self.network.encode(node_feat, adj)
+                collected_latents.append(latent_t.unsqueeze(0))
+            latent_seq = torch.cat(collected_latents, dim=0)
+            ce_loss, fric_loss, spd_loss, _, _ = compute_event_loss(
+                states.view(len_time, batch_size, 23, 4),
+                latent_seq,
+                self.event_module,
+                dt=dt,
+            )
+            out['L_event_ce'] = ce_loss.detach()
+            event_total = ce_loss + 0.5 * fric_loss + 0.3 * spd_loss
+            out['L_event'] = (self.event_loss_weight * event_total).detach()
+            out['L_rec'] = out['L_rec'] + self.event_loss_weight * event_total
 
         return out, out2
 

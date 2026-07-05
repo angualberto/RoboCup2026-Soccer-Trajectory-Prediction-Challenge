@@ -1,0 +1,53 @@
+{
+  "experiment": "Dynamic Fallback — Final",
+  "date": "2026-07-05",
+  "model": "GTPA (GNN + Causal Transformer + Particle Filter)",
+  "checkpoint": "16_20.pt",
+  "description": "Hybrid post-processing: ball always gets full Lorentz drag correction; players get stability-based dynamic blend",
+  "parameters": {
+    "use_fluid_ball": true,
+    "fluid_ball_gamma": 0.6,
+    "fluid_ball_sigma": 0.02,
+    "use_dynamic_fallback": true,
+    "fallback_w_dist": 0.6,
+    "fallback_w_speed": 0.2,
+    "fallback_w_horizon": 0.2,
+    "fallback_w_accel": 0.0,
+    "ball_always_lorentz": true,
+    "particle_filter": {
+      "num_particles": 32,
+      "use_perturbation": true,
+      "noise_scale": 0.2,
+      "p_event": 1.0,
+      "use_recursive_memory": true,
+      "recursive_alpha": 0.3,
+      "use_intercept": true,
+      "intercept_beta": 0.5,
+      "intercept_horizon": 5,
+      "intercept_weight": 0.5
+    }
+  },
+  "results": {
+    "official_4_scenes": {
+      "overall_error_m": 14.94,
+      "per_scene_m": [15.6, 11.4, 18.9, 13.8],
+      "ball_inside_field": "86/120 frames (72%)",
+      "baseline_error_m": 29.69,
+      "baseline_ball_inside": "47/120 (39%)",
+      "improvement_vs_baseline": "-49.7%"
+    },
+    "generalization_mars_4_scenes": {
+      "overall_error_m": 13.90,
+      "ball_inside_field": "78%",
+      "baseline_error_m": 69.78,
+      "improvement_vs_baseline": "-80.1%"
+    },
+    "reproducibility": "3 identical runs (14.94 m ± 0.00)"
+  },
+  "key_insight": "Ball needs full physical correction (Lorentz drag); players preserve learned dynamics via adaptive blend. Separating the two avoids the accuracy-vs-stability trade-off.",
+  "files": {
+    "predictions": "submission_final/tracking_csv/",
+    "baseline": "submission_final/baseline_official/",
+    "metrics": "submission_final/metrics/"
+  }
+}

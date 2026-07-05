@@ -84,6 +84,15 @@ parser.add_argument('--pn_k_lateral', type=float, default=2.0)
 parser.add_argument('--use_fluid_ball', action='store_true')
 parser.add_argument('--fluid_ball_gamma', type=float, default=0.5)
 parser.add_argument('--fluid_ball_sigma', type=float, default=0.5)
+parser.add_argument('--use_dynamic_fallback', action='store_true')
+parser.add_argument('--fallback_w_dist', type=float, default=0.5)
+parser.add_argument('--fallback_w_speed', type=float, default=0.3)
+parser.add_argument('--fallback_w_horizon', type=float, default=0.2)
+parser.add_argument('--fallback_w_accel', type=float, default=0.0)
+parser.add_argument('--fallback_accel_max', type=float, default=30.0)
+parser.add_argument('--accel_clamp', type=float, default=0.0)
+parser.add_argument('--use_event_head', action='store_true')
+parser.add_argument('--event_loss_weight', type=float, default=0.2)
 args, _ = parser.parse_known_args()
 
 path_init = './weights/' 
@@ -576,6 +585,15 @@ if __name__ == '__main__':
         'USE_FLUID_BALL': args.use_fluid_ball,
         'FLUID_BALL_GAMMA': args.fluid_ball_gamma,
         'FLUID_BALL_SIGMA': args.fluid_ball_sigma,
+        'USE_DYNAMIC_FALLBACK': args.use_dynamic_fallback,
+        'FALLBACK_W_DIST': args.fallback_w_dist,
+        'FALLBACK_W_SPEED': args.fallback_w_speed,
+        'FALLBACK_W_HORIZON': args.fallback_w_horizon,
+        'FALLBACK_W_ACCEL': args.fallback_w_accel,
+        'FALLBACK_ACCEL_MAX': args.fallback_accel_max,
+        'ACCEL_CLAMP': args.accel_clamp,
+        'USE_EVENT_HEAD': args.use_event_head,
+        'EVENT_LOSS_WEIGHT': args.event_loss_weight,
     }
 
     # ================== CARREGAMENTO DO MODELO ==================
@@ -736,7 +754,17 @@ if __name__ == '__main__':
                 tensor = torch.cat([tensor, pad_tensor], dim=0)
 
             with torch.no_grad():
+                if hasattr(model, 'particle_filter'):
+                    model.particle_filter.alpha_trace = []
                 sample, _, _ = model.sample(tensor, rollout=True, burn_in=input_len, n_sample=1, TEST=True, Challenge=args.Challenge)
+
+            # Dump alpha trace for analysis
+            if hasattr(model, 'particle_filter') and model.particle_filter.alpha_trace:
+                import json
+                trace_path = f'results/test/alpha_trace_seq{seq}.json'
+                os.makedirs('results/test', exist_ok=True)
+                with open(trace_path, 'w') as f:
+                    json.dump(model.particle_filter.alpha_trace, f, indent=2)
 
             # Restore RNN params if needed
             if args.model == 'RNN':
