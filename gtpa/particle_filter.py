@@ -670,7 +670,6 @@ class ParticleFilter:
             w_step = torch.exp(-vel_dev)
             w_step = w_step / (w_step.sum(dim=-1, keepdim=True) + 1e-8)  # (B, P)
 
-            # ---- Weighted consensus (raw) ----
             for b in range(B):
                 lo, hi = b * P, (b + 1) * P
                 w_b = w_step[b:b+1, :, None, None]  # (1, P, 1, 1)
