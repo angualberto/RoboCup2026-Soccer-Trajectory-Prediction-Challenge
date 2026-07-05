@@ -92,6 +92,7 @@ parser.add_argument('--hybrid_linear_speed', type=float, default=0.3)
 parser.add_argument('--hybrid_fluid_accel', type=float, default=0.5)
 parser.add_argument('--use_ocsvm_ball', action='store_true')
 parser.add_argument('--ocsvm_model_path', type=str, default='weights/ocsvm_ball.pkl')
+parser.add_argument('--use_simpson', action='store_true')
 parser.add_argument('--use_dynamic_fallback', action='store_true')
 parser.add_argument('--fallback_w_dist', type=float, default=0.5)
 parser.add_argument('--fallback_w_speed', type=float, default=0.3)
@@ -601,6 +602,7 @@ if __name__ == '__main__':
         'HYBRID_FLUID_ACCEL': args.hybrid_fluid_accel,
         'USE_OCSVM_BALL': args.use_ocsvm_ball,
         'OCSVM_MODEL_PATH': args.ocsvm_model_path,
+        'USE_SIMPSON': args.use_simpson,
         'USE_DYNAMIC_FALLBACK': args.use_dynamic_fallback,
         'FALLBACK_W_DIST': args.fallback_w_dist,
         'FALLBACK_W_SPEED': args.fallback_w_speed,
