@@ -22,8 +22,9 @@ This project implements a trajectory prediction model for the RoboCup 2026 Socce
 | GTPA Baseline | 56.87m | — |
 | + PF + Fluid Ball γ=0.4 | 15.46m | -72.8% |
 | + PF + Fluid Ball γ=0.6 | 14.92m | -73.8% |
+| + Heun integrator | 14.74m | -74.1% |
+| **+ FB γ=0.8** | **14.60m** | **-74.3%** |
 | — without intercept | 32.36m | -43.1% |
-| **+ Heun integrator** | **14.74m** | **-74.1%** |
 
 ### Integrator Comparison
 
@@ -37,16 +38,19 @@ This project implements a trajectory prediction model for the RoboCup 2026 Socce
 
 Heun (RK2) replaces the network's position update with `x_{t+1} = x_t + (v_t + v_{t+1})/2 * dt`, reducing integration drift.
 
-**Key finding:** Intercept correction is the single most important component, responsible for ~60% of total gain. Without it, error doubles across all 4 scenes.
+**Key findings:**
+- Intercept correction is the single most important component (~60% of total gain)
+- γ=0.8 beats γ=0.6 (14.60m vs 14.74m): more damping = more stable intercept target
+- The PF ensemble (32 particles) is already near-optimal — trajectory selection adds nothing
 
 ### Per-Scene Error Breakdown
 
-| Scene | Match | Frames | γ=0.6 | w/o Intercept |
+| Scene | Match | Frames | γ=0.8 (best) | w/o Intercept |
 |:----:|-------|:-----:|:----:|:------------:|
-| 1 | HELIOS2024_2 vs CYRUS_0 | 2798→2828 | 14.60m | 32.74m |
-| 2 | HELIOS2024_1 vs CYRUS_0 | 2293→2323 | 17.23m | 30.15m |
-| 3 | CYRUS_1 vs HELIOS2024_1 | 472→502 | 13.99m | 32.79m |
-| 4 | CYRUS_1 vs HELIOS2024_0 | 1168→1198 | 13.85m | 33.74m |
+| 1 | HELIOS2024_2 vs CYRUS_0 | 2798→2828 | 14.73m | 32.74m |
+| 2 | HELIOS2024_1 vs CYRUS_0 | 2293→2323 | 15.95m | 30.15m |
+| 3 | CYRUS_1 vs HELIOS2024_1 | 472→502 | 13.77m | 32.79m |
+| 4 | CYRUS_1 vs HELIOS2024_0 | 1168→1198 | 13.95m | 33.74m |
 
 ### GT vs Prediction — Ball Trajectories
 ![GT Comparison](results/test/gt_comparison.png)
@@ -98,8 +102,8 @@ Particles: 32
 PF Alpha: 0.5 | PF Beta: 0.5 | PF Gamma: 1.0
 Recursive Alpha: 0.3
 Intercept Beta: 0.5 | Intercept Horizon: 5 | Intercept Weight: 0.5
-Fluid Ball Gamma: 0.6 | Fluid Ball Sigma: 0.02
-Integrator: heun (default, RK2 adaptive step)
+Fluid Ball Gamma: 0.8 | Fluid Ball Sigma: 0.02
+Integrator: heun (default, RK2)
 Perturbation Noise: 0.2 | Perturbation Event: 1.0
 ```
 
@@ -111,7 +115,7 @@ python main.py --model gtpa --data robocup2D --data_dir robocup2d_data \
     --batchsize 16 --totalTimeSteps 20 --epochs 30
 ```
 
-### Inference (best config — γ=0.6)
+### Inference (best config — γ=0.8)
 ```bash
 python main.py --model gtpa --data robocup2D --data_dir robocup2d_data \
     --batchsize 16 --totalTimeSteps 20 \
@@ -120,8 +124,9 @@ python main.py --model gtpa --data robocup2D --data_dir robocup2d_data \
     --pf_alpha 0.5 --pf_beta 0.5 --pf_gamma 1.0 --pf_num_particles 32 \
     --use_recursive_memory --recursive_alpha 0.3 \
     --use_intercept --intercept_beta 0.5 --intercept_horizon 5 --intercept_weight 0.5 \
-    --use_fluid_ball --fluid_ball_gamma 0.6 --fluid_ball_sigma 0.02
+    --use_fluid_ball --fluid_ball_sigma 0.02
 ```
+> `--fluid_ball_gamma` defaults to **0.8** (new best); `--integrator` defaults to **heun** (RK2).
 
 ### Evaluation
 ```bash

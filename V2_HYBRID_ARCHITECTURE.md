@@ -55,12 +55,12 @@ Input (histórico)
 
 Cada hipótese é UMA CONFIGURAÇÃO COMPLETA rodando o PF com weighted average internamente:
 
-| Hipótese | γ | Integrator | Intercept | Descrição |
-|----------|:-:|:----------:|:---------:|----------|
-| H₁ (ref) | 0.6 | Heun | β=0.5 | Baseline V1 (14.74m) |
-| H₂ (inercial) | 0.4 | Heun | β=0.5 | Bola voa mais longe |
-| H₃ (amortecido) | 0.8 | Euler | β=0.3 | Bola para rápido |
-| H₄ (PN) | 0.6 | Heun | PN | Intercept proporcional |
+| Hipótese | γ | Integrator | Intercept | test_old | 2026 |
+|----------|:-:|:----------:|:---------:|:--------:|:----:|
+| H₁ (ref) | 0.8 | Heun | β=0.5 | 6.81m | **14.60m** |
+| H₂ (leve) | 0.6 | Heun | β=0.5 | 6.85m | 14.74m |
+| H₃ (inercial) | 0.4 | Heun | β=0.5 | 7.04m | 15.46m |
+| H₄ (PN) | 0.8 | Heun | PN | — | — |
 
 Idealmente K=4 ou K=8, cada uma usando 32/P = 8 partículas para manter 32 forward passes totais.
 

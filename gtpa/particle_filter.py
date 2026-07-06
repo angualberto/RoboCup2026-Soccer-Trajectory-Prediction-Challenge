@@ -69,7 +69,7 @@ class ParticleFilter:
                  intercept_horizon=5, intercept_weight=0.5,
                  use_pn_intercept=False, pn_beta=0.7,
                  pn_N=4.0, pn_k_lateral=2.0,
-                 use_fluid_ball=False, fluid_ball_gamma=0.5,
+                 use_fluid_ball=False, fluid_ball_gamma=0.8,
                  fluid_ball_sigma=0.5,
                  fluid_ball_gamma_target=None, fluid_ball_gamma_tau=3.0,
                  use_hybrid_ball=False,
