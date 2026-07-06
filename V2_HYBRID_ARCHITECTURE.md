@@ -1,4 +1,152 @@
-# V2: Heterogeneous Ensemble + Bipartite Trajectory Selection
+# V2: Multi-Agent Interaction Model (Lotka-Volterra N×N)
+
+## Motivação
+
+A investigação de diversidade mostrou que:
+
+> O landscape de parâmetros do GTPA é um pico agudo — qualquer desvio do ótimo piora o resultado. Não existe "ensemble heterogêneo" viável com o mesmo modelo.
+
+O próximo salto exige uma **mudança de arquitetura**, não tuning de parâmetros.
+
+A proposta: substituir a predição de aceleração da GTPA por um **sistema de forças multi-agente N×N**, onde cada jogador interage com todos os outros 21 jogadores + bola via forças de atração/repulsão/cooperação.
+
+## Arquitetura
+
+```
+Estado atual (pos, vel para 22 jogadores + bola)
+         │
+         ▼
+Para cada frame (1..30):
+         │
+    ┌────┴────┐
+    │         │
+  Bola:    Para cada agente i:
+  Fluid      │
+  Ball     Para cada agente j ≠ i:
+  + Heun     │
+             ├── relacao = classificar(i, j)
+             │   │
+             │   ├── PERSEGUIR: força += atração(i, j, peso)
+             │   ├── DESVIAR:   força += repulsão(i, j, peso)
+             │   ├── APOIAR:    força += cooperação(i, j, peso)
+             │   └── IGNORAR:   força = 0
+             │
+             └── força += influência_da_bola(i)
+                  │
+                  ▼
+             v_i += força × dt
+             x_i += Heun(v_i)
+         │
+         ▼
+Próximo frame
+```
+
+## Matriz de Interação A_ij
+
+Cada par (i, j) tem um tipo de interação dinâmico:
+
+| A_ij | Tipo | Comportamento | Quando |
+|:----:|------|--------------|--------|
+| +1 | Perseguir | Atração | Adversário com bola |
+| -1 | Desviar | Repulsão | Marcador muito próximo (< 2m) |
+| +0.5 | Apoiar | Cooperação | Companheiro livre |
+| 0 | Ignorar | — | Adversário distante (> 5m) |
+
+**A cada frame**, A_ij é recalculado baseado nas posições relativas, velocidades e posse de bola.
+
+## Forças
+
+### Perseguir (atração)
+
+```python
+def forca_perseguir(i, j, k=0.3):
+    direcao = (pos_j - pos_i) / ||pos_j - pos_i||
+    return k * direcao
+```
+
+### Desviar (repulsão)
+
+```python
+def forca_desviar(i, j, k=0.5, d_min=2.0):
+    dist = ||pos_i - pos_j||
+    if dist < d_min:
+        direcao = (pos_i - pos_j) / dist
+        return k * (d_min - dist) / d_min * direcao
+    return 0
+```
+
+### Apoiar (cooperação)
+
+```python
+def forca_apoiar(i, j, k=0.15):
+    # puxa em direção a uma posição intermediária
+    vetor = (pos_j - pos_i) / ||pos_j - pos_i||
+    return k * vetor
+```
+
+### Influência da bola
+
+```python
+def forca_bola(i, k=0.4):
+    if sou_goleiro:
+        return 0  # goleiro tem dinâmica própria
+    direcao = (pos_ball - pos_i) / ||pos_ball - pos_i||
+    return k * direcao
+```
+
+## Classificador de Relação
+
+```python
+def classificar(i, j, ball, possession):
+    if j == ball:
+        return INFLUENCIA_BOLA
+    if possession[j] and j é adversário:
+        return PERSEGUIR  # adversário com a bola
+    if ||pos_i - pos_j|| < 2.0 and j é adversário:
+        return DESVIAR  # muito perto
+    if j é companheiro and ||pos_j - ball|| < ||pos_i - ball||:
+        return APOIAR  # companheiro mais perto da bola
+    if j é adversário and ||pos_i - pos_j|| > 5.0:
+        return IGNORAR  # longe
+    return IGNORAR
+```
+
+## Integração com GTPA (híbrido)
+
+O GTPA não é descartado — ele vira **uma das fontes de força**:
+
+```python
+forca_total = (1 - w) * forca_lv + w * forca_gtpa
+```
+
+Onde `w` decai com o horizonte:
+- Frames 1-5: w=1.0 (confia no GTPA, que é preciso no curto prazo)
+- Frames 5-15: w decai linearmente para 0.3 (transição)
+- Frames 15-30: w=0.3 (Lotka-Volterra domina, GTPA como correção)
+
+Isso aproveita o melhor dos dois mundos: precisão neural no curto prazo + estabilidade física no longo prazo.
+
+## Vantagens
+
+1. **Sem drift neural**: as forças são grounded em física, não acumulam erro de rede
+2. **Determinístico**: sem PF, sem partículas, sem ruído
+3. **Interpretável**: cada força tem significado tático
+4. **N-body nativo**: jogadores interagem entre si, não via GNN
+5. **Rápido**: O(N²) com N=23 ~ 529 pares por frame, trivial
+
+## Como calibrar as forças
+
+Os parâmetros (k de cada força, distâncias limite) podem ser:
+- Estimados dos dados de treino (distribuição de distâncias jogador-bola, jogador-jogador)
+- Otimizados por busca em grade nos 3 cenários de test_old
+- Aprendidos por regressão (se tivermos ground truth de aceleração)
+
+## Próximos Passos
+
+1. Implementar o simulador Lotka-Volterra N×N puro (sem GTPA)
+2. Testar se consegue manter jogadores em campo por 30 frames
+3. Comparar trajetórias com ground truth do test_old
+4. Se viável, integrar com GTPA como fonte de força mista
 
 ## Motivação
 
