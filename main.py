@@ -94,6 +94,7 @@ parser.add_argument('--use_ocsvm_ball', action='store_true')
 parser.add_argument('--ocsvm_model_path', type=str, default='weights/ocsvm_ball.pkl')
 parser.add_argument('--integrator', type=str, default='heun', choices=['legacy','euler','heun','simpson','ab2'])
 parser.add_argument('--use_dynamic_fallback', action='store_true')
+parser.add_argument('--trajectory_select', action='store_true')
 parser.add_argument('--fallback_w_dist', type=float, default=0.5)
 parser.add_argument('--fallback_w_speed', type=float, default=0.3)
 parser.add_argument('--fallback_w_horizon', type=float, default=0.2)
@@ -612,6 +613,7 @@ if __name__ == '__main__':
         'ACCEL_CLAMP': args.accel_clamp,
         'USE_EVENT_HEAD': args.use_event_head,
         'EVENT_LOSS_WEIGHT': args.event_loss_weight,
+        'USE_TRAJECTORY_SELECT': args.trajectory_select,
     }
 
     # ================== CARREGAMENTO DO MODELO ==================

@@ -84,7 +84,8 @@ class ParticleFilter:
                  fallback_accel_max=30.0,
                  use_wavelet=False,
                  wavelet_level=1,
-                 wavelet_family='db4'):
+                 wavelet_family='db4',
+                 use_trajectory_select=False):
         self.model = model
         self.num_particles = num_particles
         self.num_actions = num_actions
@@ -191,6 +192,9 @@ class ParticleFilter:
         self.wavelet_level = wavelet_level
         self.wavelet_family = wavelet_family
 
+        # Trajectory selection (bipartite: keep particles separate, select best full trajectory)
+        self.use_trajectory_select = use_trajectory_select
+
         # Alpha trace: logs blend weight per scene/frame for analysis
         self.alpha_trace = []  # list of dicts: {scene, frame, alpha}
 
@@ -234,6 +238,49 @@ class ParticleFilter:
                 out[:, b, a, 2:4] = vel
 
         return out
+
+    # ------------------------------------------------------------------
+    #  Trajectory-level cost (bipartite selection)
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def _trajectory_cost(self, traj: torch.Tensor) -> torch.Tensor:
+        """Multi-agent cost for a single particle's full trajectory.
+
+        traj: (T, 23, 4) — T frames × (22 players + 1 ball) × (x, y, vx, vy)
+
+        Returns scalar cost. Lower = better trajectory.
+
+        Cost components (per frame, accumulated):
+          1. Ball physics drift × 5
+          2. Player velocity smoothness × 1
+          3. Ball-player distance coherence × 2
+          4. Out-of-bounds penalty × 10 per violation
+        """
+        T = traj.size(0)
+        total = torch.tensor(0.0, device=traj.device)
+        for t in range(1, T):
+            prev = traj[t - 1]
+            curr = traj[t]
+
+            # 1. Ball physics: curr_pos ≈ prev_pos + prev_vel
+            expected_ball = prev[22, :2] + prev[22, 2:4]
+            ball_drift = torch.norm(curr[22, :2] - expected_ball) * 5.0
+
+            # 2. Player velocity smoothness
+            accel = (curr[:22, 2:4] - prev[:22, 2:4]).norm(dim=-1).mean()
+
+            # 3. Ball-player distance coherence
+            bp_t = (curr[:22, :2] - curr[22:23, :2]).norm(dim=-1)
+            bp_t_prev = (prev[:22, :2] - prev[22:23, :2]).norm(dim=-1)
+            bp_change = (bp_t - bp_t_prev).abs().mean() * 2.0
+
+            # 4. Out-of-bounds (players only)
+            x, y = curr[:22, 0], curr[:22, 1]
+            oob = ((x < -52.5) | (x > 52.5) | (y < -34.0) | (y > 34.0)).float().sum() * 10.0
+
+            total += ball_drift + accel + bp_change + oob
+
+        return total
 
     # ------------------------------------------------------------------
     #  Weight computation
@@ -470,12 +517,16 @@ class ParticleFilter:
         # ---- Allocate ----
         smooth_traj = torch.zeros(B, T, n_agents, 4, device=device)  # smoothed
         raw_traj = torch.zeros(B, T, n_agents, 4, device=device)     # raw network output
+        if self.use_trajectory_select:
+            self._particle_states = torch.zeros(B, P, T, n_agents, 4, device=device)
 
         # ---- Burn-in: all particles share the observed state ----
         for t in range(burn_in):
             init = initial_state[t, 0].view(B, -1, 4)
             smooth_traj[:, t] = init
             raw_traj[:, t] = init
+            if self.use_trajectory_select:
+                self._particle_states[:, :, t] = init.unsqueeze(1).expand(-1, P, -1, -1)
             for p in range(P):
                 _pad = initial_state[t, 0].view(-1, 23, 4)
                 if p == 0:
@@ -722,6 +773,11 @@ class ParticleFilter:
 
             for b in range(B):
                 lo, hi = b * P, (b + 1) * P
+
+                # Store per-particle states (after all dynamics, before recursive_alpha)
+                if self.use_trajectory_select:
+                    self._particle_states[b, :, step + 1] = next_state[lo:hi].detach().clone()
+
                 w_b = w_step[b:b+1, :, None, None]  # (1, P, 1, 1)
                 weighted = (next_state[lo:hi] * w_b).sum(dim=1, keepdim=True)  # (1, 23, 4)
                 raw_traj[b, step + 1] = weighted[0]
@@ -748,6 +804,16 @@ class ParticleFilter:
             ball_vel_history.append(current[0:1, 22:23, 2:4].detach())
             latent_history.append(latent.detach())
             current = next_state
+
+        # ---- Trajectory selection (bipartite: pick best full trajectory) ----
+        if self.use_trajectory_select:
+            # self._particle_states: (B, P, T, 23, 4)
+            for b in range(B):
+                costs = torch.zeros(P, device=device)
+                for p in range(P):
+                    costs[p] = self._trajectory_cost(self._particle_states[b, p])
+                best_p = costs.argmin().item()
+                smooth_traj[b] = self._particle_states[b, best_p].clone()
 
         # ---- Format output (smoothed trajectory) ----
         out = smooth_traj.permute(1, 2, 0, 3).reshape(T, 1, B, 92)

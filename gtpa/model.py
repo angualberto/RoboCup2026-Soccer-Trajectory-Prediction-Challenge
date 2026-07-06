@@ -149,6 +149,7 @@ class GTPAModel(nn.Module):
             use_wavelet=params.get('USE_WAVELET', False),
             wavelet_level=params.get('WAVELET_LEVEL', 1),
             wavelet_family=params.get('WAVELET_FAMILY', 'db4'),
+            use_trajectory_select=params.get('USE_TRAJECTORY_SELECT', False),
         )
 
     def _build_state_components(self, state_curr):
