@@ -1,222 +1,139 @@
-# V2: Hybrid Regime-Aware Trajectory Prediction
+# V2: Heterogeneous Ensemble + Bipartite Trajectory Selection
+
+## Motivação
+
+O experimento de seleção de trajetórias (--trajectory_select) revelou algo fundamental:
+
+> **Seleção entre hipóteses similares não adianta. O ganho vem de gerar hipóteses QUALITATIVAMENTE diferentes e só então selecionar.**
+
+O weighted average do PF funciona como regularizador de ensemble porque as 32 partículas são correlacionadas (mesmo modelo, mesmo γ, mesmo intercept). Nesse regime, a média é ótima.
+
+A V2 muda o paradigma:
+
+```
+V1: 1 modelo × 32 partículas → média ponderada
+V2: K modelos × P partículas → seleção bipartido
+```
 
 ## Arquitetura
 
 ```
-Últimos 50 frames
-        │
-        ▼
-Estimativa de velocidade e aceleração
-        │
-        ▼
-Detector de Regime
-        │
- ┌──────┼──────────┐
- │      │          │
- ▼      ▼          ▼
-Linear FluidBall Lorenz
- │      │          │
- └──────┴──────────┘
-        │
-        ▼
-Intercept Correction
-        │
-        ▼
-Predição Final
+Input (histórico)
+         │
+    ┌────┴────┐
+    │         │
+  GTPA     FeatureExtractor (vel, acc, ball-dist, formação)
+    │         │
+    │    Detector de Regime (play / pass / shot / drift)
+    │         │
+    └────┬────┘
+         │
+   Gerador de Hipóteses (K=4)
+         │
+    ┌────┼────┬────┐
+    │    │    │    │
+   H₁   H₂   H₃   H₄
+  γ=0.6 γ=0.4 γ=0.8 γ=0.6
+  Heun  Heun  Euler Heun
+  int=y int=y int=n int=y+PN
+         │
+    ┌────┴────┐
+    │         │
+  Custo   Custo
+  Físico  Regime
+    │         │
+    └────┬────┘
+         │
+  Bipartite Matching (trajetória completa)
+         │
+   Trajetória Final (30 frames × 12 agentes)
 ```
 
-O sistema é **recalculado a cada frame** — não gera uma trajetória única para 30 frames, mas sim um **Lorenz Local Adaptativo** passo a passo:
+### Componentes
 
-```
-Frame t
-     │
-Detecta regime
-     │
-Calcula Lorenz local (se necessário)
-     │
-Atualiza bola
-     │
-Corrige jogadores (intercept)
-     │
-Frame t+1
-```
+#### 1. Gerador de Hipóteses (K configurações)
 
-Isso mantém a simplicidade (sem RNN), preserva a física do Fluid Ball e usa o componente não linear apenas quando ele acrescenta informação.
+Cada hipótese é UMA CONFIGURAÇÃO COMPLETA rodando o PF com weighted average internamente:
 
-## Implementação
+| Hipótese | γ | Integrator | Intercept | Descrição |
+|----------|:-:|:----------:|:---------:|----------|
+| H₁ (ref) | 0.6 | Heun | β=0.5 | Baseline V1 (14.74m) |
+| H₂ (inercial) | 0.4 | Heun | β=0.5 | Bola voa mais longe |
+| H₃ (amortecido) | 0.8 | Euler | β=0.3 | Bola para rápido |
+| H₄ (PN) | 0.6 | Heun | PN | Intercept proporcional |
 
-### BallState
+Idealmente K=4 ou K=8, cada uma usando 32/P = 8 partículas para manter 32 forward passes totais.
+
+#### 2. Custo por Trajetória (30 frames)
 
 ```python
-import numpy as np
+def trajectory_cost(traj, regime=None):
+    """
+    traj: (T, 23, 4)
+    regime: regime detectado (opcional, para bônus)
+    """
+    # Física da bola: posição consistente com velocidade
+    ball_drift = ||ball_pos_t - (ball_pos_{t-1} + ball_vel_{t-1})||
 
-class BallState:
-    def __init__(self, pos, vel, acc):
-        self.pos = np.asarray(pos, dtype=float)
-        self.vel = np.asarray(vel, dtype=float)
-        self.acc = np.asarray(acc, dtype=float)
+    # Suavidade dos jogadores: sem saltos de velocidade
+    player_accel = ||v_players_t - v_players_{t-1}||
+
+    # Coerência bola-jogador: distâncias mudam suavemente
+    bp_change = |dist_ball_player_t - dist_ball_player_{t-1}|
+
+    # Limites de campo
+    oob = sum(players fora do campo)
+
+    # Bônus de regime (se disponível):
+    #   Se regime=SHOT espera-se ball_vel alta → penaliza H₂ (inercial fraca)
+    #   Se regime=DRIFT espera-se ball_vel baixa → penaliza H₁ (γ=0.6 forte demais)
+
+    return (ball_drift * 5 + player_accel * 1 +
+            bp_change * 2 + oob * 10 + regime_bonus)
 ```
 
-### Detector de Regime
+#### 3. Bipartite Selection
+
+Entrada: K trajetórias completas (30 × 23 × 4)
+Saída: 1 trajetória (menor custo acumulado)
 
 ```python
-from enum import Enum
-
-class Regime(Enum):
-    LINEAR = 0
-    FLUID = 1
-    CHAOTIC = 2
-
-def detect_regime(ball):
-    speed = np.linalg.norm(ball.vel)
-    accel = np.linalg.norm(ball.acc)
-
-    if speed < 0.3:
-        return Regime.LINEAR
-    if accel < 0.5:
-        return Regime.FLUID
-    return Regime.CHAOTIC
+costs = [trajectory_cost(h, regime) for h in hypotheses]
+best = argmin(costs)
 ```
 
-### Modelo Linear
+O matching é trivial (seleção 1-de-K) porque cada hipótese é uma trajetória COMPLETA. A complexidade está em gerar hipóteses diversas, não em selecionar.
 
-```python
-def linear_step(ball):
-    ball.pos += ball.vel
-    return ball
-```
+## Por que isso é diferente do que foi testado
 
-### Fluid Ball (γ)
+O experimento que fiz (--trajectory_select) selecionava entre 32 partículas do MESMO modelo. O resultado foi 6.99m (> 6.85m) porque não havia diversidade real.
 
-```python
-def fluid_step(ball, gamma=0.6):
-    ball.vel *= gamma
-    ball.pos += ball.vel
-    return ball
-```
+Na V2, cada hipótese é gerada por uma CONFIGURAÇÃO DIFERENTE:
+- γ diferentes → comportamentos de bola radicalmente diferentes
+- Integradores diferentes → propagação de erro diferente
+- Intercept diferente → jogadores reagem à bola de forma diferente
 
-### Lorenz (apenas perturbação)
+Isso cria hipóteses qualitativamente distintas, onde a seleção faz sentido.
 
-O Lorenz **não substitui a trajetória** — apenas modifica a velocidade prevista:
+## Relação com Regime Detection
 
-```python
-def lorenz_step(ball, sigma=10, rho=28, beta=8/3, dt=0.01):
-    x, y = ball.vel
-    z = 1.0
-    dx = sigma * (y - x)
-    dy = x * (rho - z) - y
-    dz = x * y - beta * z
-    ball.vel += np.array([dx, dy]) * dt
-    ball.pos += ball.vel
-    return ball
-```
+O detector de regime (original da V1->V2) agora tem DOIS papéis:
 
-### Atualização Automática
+1. **Gerar hipóteses**: usar o regime detectado para INSTANCIAR configurações (ex: se SHOT, incluir H₂ com γ baixo)
+2. **Premiar/castear**: o regime serve como bônus no custo, favorecendo a hipótese mais coerente com o evento detectado
 
-```python
-def update_ball(ball):
-    regime = detect_regime(ball)
-    if regime == Regime.LINEAR:
-        return linear_step(ball)
-    if regime == Regime.FLUID:
-        return fluid_step(ball)
-    return lorenz_step(ball)
-```
+O detector pode ser simples (threshold em velocidade/aceleração) ou treinado (.rcl events → XGBoost).
 
-### Predição dos 30 Frames
+## Próximos Passos
 
-```python
-trajectory = []
-for i in range(30):
-    ball = update_ball(ball)
-    trajectory.append(ball.pos.copy())
-```
+1. **Infra**: modificar `_stepwise_simulate` para rodar K configurações e armazenar K trajetórias
+2. **Diversidade**: definir K=4 perfis (γ, integrator, intercept) que maximizem diferença semântica
+3. **Custo**: implementar `_trajectory_cost` (já esboçado no PF) com pesos calibrados
+4. **Regime**: treinar detector simples com features de velocidade/aceleração da bola
+5. **Teste**: comparar seleção bipartido vs weighted average no test_old e 2026
 
-### Intercept dos Jogadores
+## Risco
 
-```python
-for player in players:
-    direction = ball.pos - player.pos
-    d = np.linalg.norm(direction)
-    if d > 0:
-        direction /= d
-    player.pos += direction * player.speed
-```
+O ganho máximo teórico é limitado porque cada hipótese individualmente é pior que a média do ensemble. A seleção só ganha se a hipótese correta para o regime atual for significativamente melhor que a média das outras.
 
-## Melhor Ainda: Pesos ao Invés de Troca
-
-Ao invés de escolher um único modelo:
-
-```python
-linear = linear_predict(ball)
-fluid = fluid_predict(ball)
-lorenz = lorenz_predict(ball)
-
-w1 = 0.2  # peso linear
-w2 = 0.7  # peso fluid
-w3 = 0.1  # peso lorenz
-
-prediction = w1 * linear + w2 * fluid + w3 * lorenz
-```
-
-Os pesos podem depender de:
-- Velocidade da bola
-- Aceleração
-- Distância ao jogador mais próximo
-- Densidade de jogadores (Delaunay/Voronoi)
-
-## Core Insight
-
-O problema atual é que o **Fluid Ball/Lorenz** está sendo usado como um **modelo global**, enquanto o jogo de futebol é um sistema **híbrido**:
-
-- **Regiões lineares/contínuas:** jogadores correndo, bola em posse, deslocamentos suaves
-- **Regiões dinâmicas/discretas:** passe, chute, mudança brusca de direção, disputa pela bola
-
-### Por que isso faz sentido
-
-Os experimentos mostraram que:
-
-- γ=0.6 funciona porque estabiliza o sistema
-- O problema não é falta de caos; é que o caos aparece apenas em alguns momentos
-- Aplicar um modelo caótico continuamente pode "inventar" dinâmica onde ela não existe
-- Amortecer continuamente pode "matar" dinâmica onde ela deveria existir
-
-### Vantagem científica
-
-Deixa de tratar todo o jogo como caótico e passa a modelá-lo como um **sistema híbrido**, alternando entre dinâmica contínua e dinâmica não linear. Compatível com a linha de pesquisa baseada em modelos físicos e geométricos.
-
-## Key Lessons from V1
-
-1. **Intercept correction é responsável por ~60% do ganho** — manter na V2
-2. **γ=0.6 constante > γ temporal** porque a predição da bola nunca fica confiável em 30 frames
-3. **Bola = 5-19% da métrica** (1 de 12 agentes) — melhorar a bola sozinha dá ganho limitado
-4. **Todas as 4 cenas oficiais são BALL-AT-FEET** — sem chutes no boundary
-5. **O intercept precisa de um alvo estável** — γ alto mantém a bola numa região pequena
-
-## Integrator Results (final)
-
-| Integrator | test_old | 2026 |
-|------------|:--------:|:----:|
-| legacy (network Euler) | 6.95m | 14.92m |
-| Euler (pos_t + v·dt) | 7.60m | — |
-| **Heun (RK2)** | **6.85m** | **14.74m** |
-| Simpson 1/3 | 6.96m | 14.74m |
-| AB2 | 7.67m | — |
-
-Heun (RK2) = `x_{t+1} = x_t + (v_t + v_{t+1})/2 · dt`. Consulta a velocidade amortecida duas vezes (k₁=v_t, k₂=v_{t+1}) e faz a média. Melhor integrador: reduz erro de integração sem custo computacional adicional.
-
-Variantes adaptativas testadas (adaptive_heun, confidence_heun, particle_heun) não superam Heun puro — a lógica de redução de dt quando o erro estimado é alto acaba atrasando a bola nos frames onde ela deveria se mover mais.
-
-## Dados para Treino do Detector
-
-- `.rcg.gz`: full match logs (posições)
-- `.rcl.gz`: event logs (kicks, fouls, goals com timestamps)
-- Event CSVs em `ground-truth/`
-
-## Next Steps
-
-1. Parse `.rcl` para extrair kicks com frame numbers
-2. Extrair features de velocidade/aceleração dos `.rcg`
-3. Treinar classificador leve (XGBoost/MLP) para (features → kick)
-4. Integrar no particle_filter.py como `use_event_aware`
-5. Avaliar no test_old, depois one-shot no 2026
+Dado que V1 já tem 14.74m e o teto deve estar em ~14.5m (limite da rede GTPA), o ganho esperado da V2 é de 0.2-0.5m.
