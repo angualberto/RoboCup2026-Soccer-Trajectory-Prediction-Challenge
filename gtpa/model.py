@@ -146,6 +146,9 @@ class GTPAModel(nn.Module):
             fallback_w_horizon=params.get('FALLBACK_W_HORIZON', 0.2),
             fallback_w_accel=params.get('FALLBACK_W_ACCEL', 0.0),
             fallback_accel_max=params.get('FALLBACK_ACCEL_MAX', 30.0),
+            use_wavelet=params.get('USE_WAVELET', False),
+            wavelet_level=params.get('WAVELET_LEVEL', 1),
+            wavelet_family=params.get('WAVELET_FAMILY', 'db4'),
         )
 
     def _build_state_components(self, state_curr):

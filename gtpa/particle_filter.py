@@ -1,4 +1,5 @@
 import math
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -80,7 +81,10 @@ class ParticleFilter:
                  use_dynamic_fallback=False,
                  fallback_w_dist=0.5, fallback_w_speed=0.3,
                  fallback_w_horizon=0.2, fallback_w_accel=0.0,
-                 fallback_accel_max=30.0):
+                 fallback_accel_max=30.0,
+                 use_wavelet=False,
+                 wavelet_level=1,
+                 wavelet_family='db4'):
         self.model = model
         self.num_particles = num_particles
         self.num_actions = num_actions
@@ -182,8 +186,54 @@ class ParticleFilter:
         # Field half-diagonal for normalising ball distance from centre
         self.field_half_diag = math.sqrt((105.0/2)**2 + (68.0/2)**2)  # ~62.5 m
 
+        # Wavelet smoothing (post-processing on player trajectories only)
+        self.use_wavelet = use_wavelet
+        self.wavelet_level = wavelet_level
+        self.wavelet_family = wavelet_family
+
         # Alpha trace: logs blend weight per scene/frame for analysis
         self.alpha_trace = []  # list of dicts: {scene, frame, alpha}
+
+    # ------------------------------------------------------------------
+    #  Wavelet smoothing (post-processing on player positions only)
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def _wavelet_smooth(self, traj: torch.Tensor) -> torch.Tensor:
+        """Apply DWT denoising to player trajectories. Ball is left untouched.
+
+        traj: (T, B, 23, 4) where 23=agents(22 players+ball), 4=(x,y,vx,vy)
+
+        Returns smoothed tensor with same shape. Velocities are recomputed
+        from smoothed positions via finite differences.
+        """
+        if not self.use_wavelet:
+            return traj
+        T, B, _, _ = traj.shape
+        import pywt
+        device = traj.device
+        out = traj.clone()
+
+        for b in range(B):
+            for a in range(22):  # players only — ball is agent 22
+                for dim in range(2):  # x, y
+                    sig = traj[:, b, a, dim].cpu().numpy()  # (T,)
+                    if T < 4:
+                        continue
+                    coeffs = pywt.wavedec(sig, self.wavelet_family, level=self.wavelet_level, mode='symmetric')
+                    sigma = np.median(np.abs(coeffs[-1])) / 0.6745 if len(coeffs[-1]) > 0 else 0
+                    thr = sigma * np.sqrt(2.0 * np.log(T))
+                    coeffs_sm = [coeffs[0]] + [pywt.threshold(c, thr, mode='soft') for c in coeffs[1:]]
+                    sig_sm = pywt.waverec(coeffs_sm, self.wavelet_family, mode='symmetric')
+                    out[:, b, a, dim] = torch.tensor(sig_sm[:T], device=device)
+
+                # Recompute velocities from smoothed positions
+                pos = out[:, b, a, :2]  # (T, 2)
+                vel = torch.zeros_like(pos)
+                vel[1:] = pos[1:] - pos[:-1]
+                vel[0] = vel[1]  # copy forward for t=0
+                out[:, b, a, 2:4] = vel
+
+        return out
 
     # ------------------------------------------------------------------
     #  Weight computation
@@ -701,6 +751,13 @@ class ParticleFilter:
 
         # ---- Format output (smoothed trajectory) ----
         out = smooth_traj.permute(1, 2, 0, 3).reshape(T, 1, B, 92)
+
+        # ---- Wavelet smoothing (post-processing on player trajectories) ----
+        if self.use_wavelet:
+            wav = out.view(T, B, 23, 4)
+            wav = self._wavelet_smooth(wav)
+            out = wav.view(T, 1, B, 92)
+
         return out
 
     # ------------------------------------------------------------------
