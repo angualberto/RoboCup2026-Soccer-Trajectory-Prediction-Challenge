@@ -263,7 +263,94 @@ Na V2, cada hipótese é gerada por uma CONFIGURAÇÃO DIFERENTE:
 
 Isso cria hipóteses qualitativamente distintas, onde a seleção faz sentido.
 
-## Relação com Regime Detection
+## Aperfeiçoamento: Bola como Sistema Híbrido (Logístico + Física)
+
+### O Problema
+
+O LV N×N funciona para jogadores porque eles **perseguem, desviam, apoiam** — forças contínuas bem modeladas por Lotka-Volterra.
+
+A bola **não segue esse padrão**. Ela é um objeto passivo que sofre **transições discretas** (passes, chutes, desvios). Tentar modelar a bola com LV puro falha porque:
+
+1. A bola não "persegue" ninguém — não há força natural de atração/repulsão
+2. O fluid ball (γ) já modela bem a dinâmica livre
+3. Faltam os eventos de kick que mudam a trajetória abruptamente
+
+### A Solução: Mapa Logístico para Regime da Bola
+
+O mapa logístico `x_{n+1} = r·x_n·(1-x_n)` controla a **intensidade do estado da bola**, não a posição:
+
+| Regime | Faixa de x | r típico | Dinâmica |
+|--------|:----------:|:--------:|----------|
+| CONTROLLED | 0.0-0.3 | 1.0-2.5 | Bola segue o jogador mais próximo (possuidor) |
+| FREE | 0.3-0.7 | 2.5-3.3 | Fluid Ball + Heun (γ=0.8) |
+| PASS/SHOT | 0.7-1.0 | 3.3-4.0 | Impulso instantâneo na velocidade da bola |
+
+O parâmetro `r` depende do contexto do jogo:
+- `r` pequeno quando a bola está perto de um jogador (< 1m) e a velocidade é baixa
+- `r` médio quando a bola está livre (distante de todos)
+- `r` alto quando há indício de evento (mudança brusca de velocidade, jogador se aproximando rápido)
+
+```python
+def ball_regime(ball, players, x_t):
+    # r_context baseado no estado do jogo
+    nearest_dist = min(np.linalg.norm(ball.pos - p.pos) for p in players)
+    ball_speed = np.linalg.norm(ball.vel)
+
+    if nearest_dist < 1.0 and ball_speed < 0.5:
+        r = 1.5  # controlled
+    elif nearest_dist > 3.0:
+        r = 3.0  # free
+    else:
+        r = 2.0 + ball_speed  # transition
+
+    x_next = r * x_t * (1 - x_t)  # logistic map
+
+    if x_next < 0.3:
+        return CONTROLLED, x_next
+    elif x_next < 0.7:
+        return FREE, x_next
+    else:
+        return KICK, x_next
+```
+
+### Vantagem do Mapa Logístico
+
+1. **Endógeno**: a transição de regime emerge do próprio estado da bola, não de um classificador externo
+2. **Caos natural**: em `r > 3.57`, o mapa é caótico — modela a imprevisibilidade de passes e desvios
+3. **Simplicidade**: uma única equação 1D substitui um detector de regime treinado
+4. **Interpretável**: `x` é a "intensidade de evento" — baixo = controlado, alto = prestes a mudar
+
+### Arquitetura Final V2
+
+```
+A cada frame:
+  │
+  ├── Jogadores: LV N×N (forças de atração/repulsão/cooperação)
+  │     │
+  │     ├── v_i += Σ_j A_ij · e^(-d_ij/σ) · direção_ij · dt
+  │     ├── v_i *= damping
+  │     ├── pos_i += Heun(v_i)
+  │     └── field_clamp(pos_i)
+  │
+  ├── Bola: Sistema Híbrido
+  │     │
+  │     ├── x_{t+1} = r(ball, players) · x_t · (1 - x_t)
+  │     │
+  │     ├── if CONTROLLED:
+  │     │     ball.vel = (nearest_player.pos - ball.pos) * 0.3
+  │     │
+  │     ├── elif FREE:
+  │     │     ball.vel *= (1 - γ·dt) + noise
+  │     │     ball.pos += Heun(vel)
+  │     │
+  │     └── elif KICK:
+  │           ball.vel = direção_do_passe * kick_strength
+  │           ball.pos += Heun(vel)
+  │
+  └── Avançar frame
+```
+
+### Relação com Regime Detection
 
 O detector de regime (original da V1->V2) agora tem DOIS papéis:
 
